@@ -1,6 +1,7 @@
 #pragma once
 
 #include "bounded_text.h"
+#include "window_geometry.h"
 
 #include <windows.h>
 
@@ -42,6 +43,8 @@ struct Settings {
     std::uint32_t intervalMilliseconds = 100;
     Hotkey hotkey{};
     ThemeMode theme = ThemeMode::System;
+    std::uint32_t clientWidth = kDefaultWindowClientWidth;
+    std::uint32_t clientHeight = kDefaultWindowClientHeight;
 };
 
 constexpr std::uint32_t kMinimumIntervalMilliseconds = 10;

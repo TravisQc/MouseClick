@@ -1,5 +1,3 @@
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
 #include <windows.h>
 
 #include <algorithm>
@@ -13,6 +11,7 @@ namespace {
 constexpr UINT kStartPauseId = 1008;
 constexpr UINT kMouseButtonSelectId = 1001;
 constexpr UINT kClickTypeSelectId = 1002;
+constexpr UINT kIntervalId = 1004;
 constexpr UINT kMouseDown = WM_LBUTTONDOWN;
 constexpr UINT kMouseUp = WM_LBUTTONUP;
 
@@ -105,14 +104,29 @@ bool RunCase(const std::wstring& executable, const std::wstring& settingsPath,
     CloseHandle(process.hThread);
 
     std::atomic<bool> controlled{false};
+    std::atomic<bool> tabOrderValid{false};
     std::atomic<bool> controlsDisabled{false};
     std::atomic<bool> controlsReenabled{false};
     const DWORD messageThread = GetCurrentThreadId();
     std::thread controller([messageThread, processId = process.dwProcessId, &controlled,
-                            &controlsDisabled, &controlsReenabled]() {
+                            &tabOrderValid, &controlsDisabled, &controlsReenabled]() {
         const HWND window = FindProcessWindow(processId);
         if (window != nullptr) {
             controlled = true;
+            const DWORD windowThread = GetWindowThreadProcessId(window, nullptr);
+            const DWORD controllerThread = GetCurrentThreadId();
+            const bool attached = AttachThreadInput(controllerThread, windowThread, TRUE) != FALSE;
+            const HWND interval = GetDlgItem(window, kIntervalId);
+            const HWND buttonSelect = GetDlgItem(window, kMouseButtonSelectId);
+            SetForegroundWindow(window);
+            SetFocus(interval);
+            PostMessageW(interval, WM_KEYDOWN, VK_TAB, 0);
+            PostMessageW(interval, WM_KEYUP, VK_TAB, 0);
+            Sleep(100);
+            tabOrderValid = GetFocus() == buttonSelect;
+            if (attached) {
+                AttachThreadInput(controllerThread, windowThread, FALSE);
+            }
             PostMessageW(window, WM_COMMAND, MAKEWPARAM(kStartPauseId, BN_CLICKED), 0);
             Sleep(250);
             controlsDisabled =
@@ -151,9 +165,10 @@ bool RunCase(const std::wstring& executable, const std::wstring& settingsPath,
     const unsigned long actions = pairsPerAction == 0 ? 0 : completePairs / pairsPerAction;
     std::wcout << label << L": down=" << down << L" up=" << up
                << L" pairs=" << completePairs << L" actions=" << actions
+               << L" tabOrder=" << tabOrderValid
                << L" disabled=" << controlsDisabled
                << L" reenabled=" << controlsReenabled << L"\n";
-    return controlled && controlsDisabled && controlsReenabled && down == up &&
+    return controlled && tabOrderValid && controlsDisabled && controlsReenabled && down == up &&
            completeActions && actions >= 90 && actions <= 110;
 }
 

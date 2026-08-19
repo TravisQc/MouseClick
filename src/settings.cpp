@@ -35,7 +35,9 @@ bool WriteAllProfileValues(const wchar_t* path, const Settings& settings,
         WriteProfileValue(L"click", L"intervalMs", settings.intervalMilliseconds, path) &&
         WriteProfileValue(L"hotkey", L"modifiers", settings.hotkey.modifiers, path) &&
         WriteProfileValue(L"hotkey", L"virtualKey", settings.hotkey.virtualKey, path) &&
-        WriteProfileValue(L"ui", L"theme", static_cast<std::uint32_t>(settings.theme), path);
+        WriteProfileValue(L"ui", L"theme", static_cast<std::uint32_t>(settings.theme), path) &&
+        WriteProfileValue(L"window", L"clientWidth", settings.clientWidth, path) &&
+        WriteProfileValue(L"window", L"clientHeight", settings.clientHeight, path);
     if (!written) {
         SetWriteError(error);
         return false;
@@ -160,6 +162,17 @@ bool LoadSettingsAtPath(const wchar_t* path, Settings* settings, ProductMessage*
     if (ParseUnsigned(text.view(), &value) &&
         value <= static_cast<std::uint32_t>(ThemeMode::Dark)) {
         settings->theme = static_cast<ThemeMode>(value);
+    }
+
+    ReadProfileValue(L"window", L"clientWidth", path, &text);
+    if (ParseUnsigned(text.view(), &value) &&
+        value >= kMinimumWindowClientWidth && value <= kMaximumWindowClientWidth) {
+        settings->clientWidth = value;
+    }
+    ReadProfileValue(L"window", L"clientHeight", path, &text);
+    if (ParseUnsigned(text.view(), &value) &&
+        value >= kMinimumWindowClientHeight && value <= kMaximumWindowClientHeight) {
+        settings->clientHeight = value;
     }
 
     return true;

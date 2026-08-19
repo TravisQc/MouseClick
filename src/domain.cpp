@@ -134,6 +134,12 @@ bool ValidateSettings(const Settings& settings, ProductMessage* error) {
         }
         return false;
     }
+    if (!IsValidWindowClientSize(settings.clientWidth, settings.clientHeight)) {
+        if (error != nullptr) {
+            error->Assign(L"窗口尺寸超出支持范围。");
+        }
+        return false;
+    }
     return IsValidHotkey(settings.hotkey, error);
 }
 

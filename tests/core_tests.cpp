@@ -34,6 +34,8 @@ void TestDomain() {
     Expect(defaults.hotkey.modifiers == (MOD_CONTROL | MOD_ALT), "default modifiers");
     Expect(defaults.hotkey.virtualKey == VK_F6, "default virtual key");
     Expect(defaults.theme == ThemeMode::System, "default theme follows system");
+    Expect(defaults.clientWidth == kDefaultWindowClientWidth, "default window width");
+    Expect(defaults.clientHeight == kDefaultWindowClientHeight, "default window height");
 
     Settings valid = defaults;
     ProductMessage error;
@@ -55,6 +57,12 @@ void TestDomain() {
     valid.hotkey.modifiers = MOD_CONTROL | MOD_ALT;
     valid.hotkey.virtualKey = VK_LWIN;
     Expect(!ValidateSettings(valid, &error), "windows-key hotkey rejected");
+    valid.hotkey.virtualKey = VK_F6;
+    valid.clientWidth = kMinimumWindowClientWidth - 1;
+    Expect(!ValidateSettings(valid, &error), "window width below minimum rejected");
+    valid.clientWidth = kDefaultWindowClientWidth;
+    valid.clientHeight = kMaximumWindowClientHeight + 1;
+    Expect(!ValidateSettings(valid, &error), "window height over maximum rejected");
 
     HotkeyText hotkeyText;
     Expect(FormatHotkey(defaults.hotkey, &hotkeyText), "default hotkey formats");
@@ -120,6 +128,8 @@ void TestSettings() {
     expected.hotkey.modifiers = MOD_CONTROL | MOD_SHIFT;
     expected.hotkey.virtualKey = VK_F8;
     expected.theme = ThemeMode::Dark;
+    expected.clientWidth = 560;
+    expected.clientHeight = 480;
 
     ProductMessage error;
     const bool saveSucceeded = SaveSettingsAtPath(path.c_str(), expected, &error);
@@ -133,6 +143,8 @@ void TestSettings() {
     Expect(loaded.hotkey.modifiers == expected.hotkey.modifiers, "modifiers round trip");
     Expect(loaded.hotkey.virtualKey == expected.hotkey.virtualKey, "virtual key round trips");
     Expect(loaded.theme == expected.theme, "theme round trips");
+    Expect(loaded.clientWidth == expected.clientWidth, "window width round trips");
+    Expect(loaded.clientHeight == expected.clientHeight, "window height round trips");
 
     WritePrivateProfileStringW(L"click", L"intervalMs", L"invalid", path.c_str());
     Expect(LoadSettingsAtPath(path.c_str(), &loaded), "corrupt settings still load safely");
@@ -166,6 +178,25 @@ void TestSettings() {
     Expect(loaded.theme == ThemeMode::System, "corrupt theme follows system");
     WritePrivateProfileStringW(L"ui", L"theme", L"2", path.c_str());
 
+    WritePrivateProfileStringW(L"window", L"clientWidth", L"invalid", path.c_str());
+    WritePrivateProfileStringW(L"window", L"clientHeight", L"501", path.c_str());
+    Expect(LoadSettingsAtPath(path.c_str(), &loaded), "corrupt window size still loads safely");
+    Expect(loaded.clientWidth == kDefaultWindowClientWidth,
+           "corrupt window width uses default");
+    Expect(loaded.clientHeight == kDefaultWindowClientHeight,
+           "out-of-range window height uses default");
+    WritePrivateProfileStringW(L"window", L"clientWidth", L"560", path.c_str());
+    WritePrivateProfileStringW(L"window", L"clientHeight", L"480", path.c_str());
+    Expect(LoadSettingsAtPath(path.c_str(), &loaded), "valid window size loads safely");
+    Expect(loaded.clientWidth == 560 && loaded.clientHeight == 480,
+           "valid window size survives independent field recovery");
+    WritePrivateProfileStringW(L"window", L"clientWidth", nullptr, path.c_str());
+    WritePrivateProfileStringW(L"window", L"clientHeight", nullptr, path.c_str());
+    Expect(LoadSettingsAtPath(path.c_str(), &loaded), "old settings without window size load");
+    Expect(loaded.clientWidth == kDefaultWindowClientWidth &&
+               loaded.clientHeight == kDefaultWindowClientHeight,
+           "missing window size uses defaults");
+
     WritePrivateProfileStringW(L"click", L"frequency", L"20", path.c_str());
     WritePrivateProfileStringW(L"click", L"intervalMs", L"invalid", path.c_str());
     Expect(LoadSettingsAtPath(path.c_str(), &loaded), "settings with both interval formats load");
@@ -193,6 +224,51 @@ void TestSettings() {
     Expect(!SaveSettingsAtPath(missingDirectoryPath.c_str(), expected, &error),
            "save failure is reported for an unavailable directory");
     DeleteFileW(path.c_str());
+}
+
+void TestWindowGeometry() {
+    const WindowClientSize defaults = DefaultWindowClientSize();
+    Expect(defaults.width == static_cast<int>(kDefaultWindowClientWidth) &&
+               defaults.height == static_cast<int>(kDefaultWindowClientHeight),
+           "default geometry is 600 by 500");
+    const WindowClientSize clamped = ClampWindowClientSize(100, 900);
+    Expect(clamped.width == static_cast<int>(kMinimumWindowClientWidth) &&
+               clamped.height == static_cast<int>(kMaximumWindowClientHeight),
+           "geometry clamps both axes");
+    Expect(IsValidWindowClientSize(480, 440), "minimum geometry is valid");
+    Expect(IsValidWindowClientSize(600, 500), "maximum geometry is valid");
+    Expect(!IsValidWindowClientSize(479, 440), "width below minimum is invalid");
+    Expect(!IsValidWindowClientSize(600, 501), "height over maximum is invalid");
+
+    const WindowPixelSize scaled = LogicalClientSizeToPixels(WindowClientSize{600, 500}, 144);
+    Expect(scaled.width == 900 && scaled.height == 750, "geometry scales at 150 percent");
+    const WindowClientSize unscaled = PixelsToLogicalClientSize(scaled, 144);
+    Expect(unscaled.width == 600 && unscaled.height == 500,
+           "geometry unscales at 150 percent");
+
+    constexpr DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU |
+                             WS_MINIMIZEBOX | WS_THICKFRAME;
+    RECT outer{};
+    Expect(AdjustedWindowRectForClientSize(style, 0, FALSE, 96,
+                                           WindowClientSize{600, 500}, &outer),
+           "window frame adjusts for client size");
+    Expect(outer.right - outer.left > 600 && outer.bottom - outer.top > 500,
+           "outer window includes non-client frame");
+    WindowPixelSize outerSize{};
+    Expect(WindowRectSizeForClientSize(style, 0, FALSE, 144,
+                                       WindowClientSize{480, 440}, &outerSize),
+           "DPI-aware outer size calculates");
+    Expect(outerSize.width > 720 && outerSize.height > 660,
+           "DPI-aware outer size scales the client area");
+
+    const RECT inside{10, 10, 100, 100};
+    const RECT outside{10, 10, 500, 100};
+    const RECT overlapping{90, 90, 120, 120};
+    Expect(RectWithinClient(inside, 480, 440), "inside rectangle is valid");
+    Expect(!RectWithinClient(outside, 480, 440), "outside rectangle is rejected");
+    Expect(RectsOverlap(inside, overlapping), "overlapping rectangles are detected");
+    Expect(!RectsOverlap(inside, RECT{100, 100, 120, 120}),
+           "touching rectangles are not considered overlapping");
 }
 
 void TestSchedulingAndInputMapping() {
@@ -268,6 +344,7 @@ int main() {
     TestUnsignedConversion();
     TestDomain();
     TestSettings();
+    TestWindowGeometry();
     TestSchedulingAndInputMapping();
     if (failures != 0) {
         std::cerr << failures << " test(s) failed\n";

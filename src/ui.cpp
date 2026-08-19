@@ -19,6 +19,8 @@ namespace {
 
 constexpr wchar_t kWindowClassName[] = L"MouseClick.MainWindow";
 constexpr wchar_t kWindowTitle[] = L"MouseClick";
+constexpr DWORD kMainWindowStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU |
+                                   WS_MINIMIZEBOX | WS_THICKFRAME;
 
 class ComApartment final {
 public:
@@ -142,6 +144,8 @@ struct AppContext {
     bool closing = false;
     bool captureActive = false;
     bool hadHotkeyBeforeCapture = false;
+    bool sizeMoveActive = false;
+    bool sizeChangedDuringMove = false;
     ThemeColors theme;
     HBRUSH backgroundBrush = nullptr;
     HBRUSH cardBrush = nullptr;
@@ -226,6 +230,36 @@ void SetError(AppContext* context, WideTextView message) {
         SetWindowTextW(context->error, context->lastError.c_str());
         ShowWindow(context->error, context->lastError.empty() ? SW_HIDE : SW_SHOW);
         InvalidateRect(context->error, nullptr, TRUE);
+    }
+}
+
+void UpdateWindowClientSize(AppContext* context) {
+    if (context == nullptr || context->window == nullptr) {
+        return;
+    }
+    RECT client{};
+    if (GetClientRect(context->window, &client) == FALSE || client.right <= 0 ||
+        client.bottom <= 0) {
+        return;
+    }
+    UINT dpi = GetDpiForWindow(context->window);
+    if (dpi == 0) {
+        dpi = GetDpiForSystem();
+    }
+    const WindowClientSize logical = PixelsToLogicalClientSize(
+        WindowPixelSize{client.right, client.bottom}, dpi);
+    const WindowClientSize clamped = ClampWindowClientSize(logical.width, logical.height);
+    context->settings.clientWidth = static_cast<std::uint32_t>(clamped.width);
+    context->settings.clientHeight = static_cast<std::uint32_t>(clamped.height);
+}
+
+void SaveWindowSize(AppContext* context) {
+    if (context == nullptr) {
+        return;
+    }
+    ProductMessage saveError;
+    if (!SaveSettings(context->settings, &saveError)) {
+        SetError(context, saveError.view());
     }
 }
 
@@ -418,9 +452,13 @@ void SetAccessibleName(HWND control, const wchar_t* name) {
     if (control == nullptr || name == nullptr) {
         return;
     }
+    constexpr CLSID propertyServicesClassId{
+        0xb5f8350b, 0x0548, 0x48b1, {0xa6, 0xee, 0x88, 0xbd, 0x00, 0xb4, 0xa5, 0xe7}};
+    constexpr IID propertyServicesInterfaceId{
+        0x6e26e776, 0x04f0, 0x495d, {0x80, 0xe4, 0x33, 0x30, 0x35, 0x2e, 0x31, 0x69}};
     IAccPropServices* services = nullptr;
-    if (SUCCEEDED(CoCreateInstance(__uuidof(CAccPropServices), nullptr,
-                                   CLSCTX_INPROC_SERVER, __uuidof(IAccPropServices),
+    if (SUCCEEDED(CoCreateInstance(propertyServicesClassId, nullptr,
+                                   CLSCTX_INPROC_SERVER, propertyServicesInterfaceId,
                                    reinterpret_cast<void**>(&services)))) {
         constexpr MSAAPROPID accessibleNameProperty{
             0x608d3df8, 0x8128, 0x4aa7, {0xa4, 0x28, 0xf5, 0x5e, 0x49, 0x26, 0x72, 0x91}};
@@ -537,6 +575,7 @@ struct LayoutMetrics {
     RECT optionCard{};
     RECT statusCard{};
     RECT hotkeyCard{};
+    RECT actionButton{};
     int mainLeft = 0;
     int mainRight = 0;
     int headerDividerY = 0;
@@ -550,33 +589,57 @@ RECT MakeRect(int x, int y, int width, int height) {
 LayoutMetrics CalculateLayout(HWND window) {
     RECT client{};
     GetClientRect(window, &client);
-    const int margin = DpiScale(window, 24);
-    const int gap = DpiScale(window, 16);
+    const int margin = DpiScale(window, 16);
+    const int gap = DpiScale(window, 10);
     const int mainLeft = margin;
-    const int mainRight = client.right - margin;
-    const int minimumContentWidth = DpiScale(window, 360);
-    const int availableContentWidth = mainRight - mainLeft;
-    const int contentWidth = minimumContentWidth > availableContentWidth
-                                 ? minimumContentWidth
-                                 : availableContentWidth;
+    const int mainRight = client.right > margin ? client.right - margin : mainLeft;
+    const int contentWidth = mainRight > mainLeft ? mainRight - mainLeft : 0;
     const int leftCardWidth = (contentWidth - gap) / 2;
+    const int intervalTop = DpiScale(window, 66);
+    const int intervalHeight = DpiScale(window, 78);
+    const int detailTop = intervalTop + intervalHeight + gap;
+    const int detailHeight = DpiScale(window, 142);
+    const int hotkeyTop = detailTop + detailHeight + gap;
+    const int hotkeyHeight = DpiScale(window, 64);
+    const int actionHeight = DpiScale(window, 36);
+    const int actionTop = client.bottom - DpiScale(window, 44);
 
     LayoutMetrics layout;
     layout.sidebar = MakeRect(0, 0, 0, client.bottom);
     layout.navigation = MakeRect(0, 0, 0, 0);
-    layout.intervalCard = MakeRect(mainLeft, DpiScale(window, 94),
-                                   contentWidth, DpiScale(window, 108));
-    layout.optionCard = MakeRect(mainLeft, DpiScale(window, 218),
-                                 leftCardWidth, DpiScale(window, 188));
-    layout.statusCard = MakeRect(mainLeft + leftCardWidth + gap, DpiScale(window, 218),
-                                 contentWidth - leftCardWidth - gap, DpiScale(window, 188));
-    layout.hotkeyCard = MakeRect(mainLeft, DpiScale(window, 422),
-                                 contentWidth, DpiScale(window, 86));
+    layout.intervalCard = MakeRect(mainLeft, intervalTop, contentWidth, intervalHeight);
+    layout.optionCard = MakeRect(mainLeft, detailTop, leftCardWidth, detailHeight);
+    layout.statusCard = MakeRect(mainLeft + leftCardWidth + gap, detailTop,
+                                 contentWidth - leftCardWidth - gap, detailHeight);
+    layout.hotkeyCard = MakeRect(mainLeft, hotkeyTop, contentWidth, hotkeyHeight);
+    layout.actionButton = MakeRect(mainLeft, actionTop, contentWidth, actionHeight);
     layout.mainLeft = mainLeft;
     layout.mainRight = mainRight;
-    layout.headerDividerY = DpiScale(window, 72);
-    layout.actionDividerY = client.bottom - DpiScale(window, 84);
+    layout.headerDividerY = DpiScale(window, 56);
+    layout.actionDividerY = client.bottom - DpiScale(window, 54);
     return layout;
+}
+
+bool IsLayoutValid(const LayoutMetrics& layout, const RECT& client, HWND window) {
+    if (client.right <= 0 || client.bottom <= 0) {
+        return true;
+    }
+    const RECT cards[] = {layout.intervalCard, layout.optionCard,
+                          layout.statusCard, layout.hotkeyCard, layout.actionButton};
+    for (const RECT& rect : cards) {
+        if (!RectWithinClient(rect, client.right, client.bottom)) {
+            return false;
+        }
+    }
+    if (RectsOverlap(layout.optionCard, layout.statusCard) ||
+        RectsOverlap(layout.intervalCard, layout.optionCard) ||
+        RectsOverlap(layout.intervalCard, layout.statusCard) ||
+        RectsOverlap(layout.hotkeyCard, layout.optionCard) ||
+        RectsOverlap(layout.hotkeyCard, layout.statusCard) ||
+        RectsOverlap(layout.actionButton, layout.hotkeyCard)) {
+        return false;
+    }
+    return layout.actionButton.top >= layout.hotkeyCard.bottom + DpiScale(window, 8);
 }
 
 void LayoutControls(AppContext* context) {
@@ -585,23 +648,30 @@ void LayoutControls(AppContext* context) {
     }
     RECT client{};
     GetClientRect(context->window, &client);
+    if (client.right <= 0 || client.bottom <= 0) {
+        return;
+    }
     const LayoutMetrics layout = CalculateLayout(context->window);
-    const int pad = DpiScale(context->window, 14);
-    const int labelHeight = DpiScale(context->window, 18);
-    const int helpHeight = DpiScale(context->window, 16);
-    const int rowHeight = DpiScale(context->window, 36);
+    if (!IsLayoutValid(layout, client, context->window)) {
+        SetError(context, L"窗口空间不足，无法完整显示控件。");
+        return;
+    }
+    const int pad = DpiScale(context->window, 10);
+    const int labelHeight = DpiScale(context->window, 16);
+    const int helpHeight = DpiScale(context->window, 14);
+    const int rowHeight = DpiScale(context->window, 32);
 
     MoveWindow(GetDlgItem(context->window, IDC_BRAND), layout.mainLeft,
-               DpiScale(context->window, 21), DpiScale(context->window, 104),
-               DpiScale(context->window, 28), TRUE);
+               DpiScale(context->window, 14), DpiScale(context->window, 100),
+               DpiScale(context->window, 24), TRUE);
     MoveWindow(GetDlgItem(context->window, IDC_VERSION),
-               layout.mainLeft + DpiScale(context->window, 112),
-               DpiScale(context->window, 29), DpiScale(context->window, 96), helpHeight, TRUE);
+               layout.mainLeft + DpiScale(context->window, 104),
+               DpiScale(context->window, 22), DpiScale(context->window, 80), helpHeight, TRUE);
     const int themeGap = DpiScale(context->window, 4);
-    const int themeSmallWidth = DpiScale(context->window, 56);
-    const int themeSystemWidth = DpiScale(context->window, 88);
-    const int themeHeight = DpiScale(context->window, 32);
-    const int themeY = DpiScale(context->window, 18);
+    const int themeSmallWidth = DpiScale(context->window, 44);
+    const int themeSystemWidth = DpiScale(context->window, 76);
+    const int themeHeight = DpiScale(context->window, 28);
+    const int themeY = DpiScale(context->window, 12);
     MoveWindow(context->themeSystem, layout.mainRight - themeSystemWidth, themeY,
                themeSystemWidth, themeHeight, TRUE);
     MoveWindow(context->themeDark,
@@ -612,30 +682,30 @@ void LayoutControls(AppContext* context) {
                themeSmallWidth, themeHeight, TRUE);
 
     MoveWindow(GetDlgItem(context->window, IDC_LABEL_INTERVAL), layout.intervalCard.left + pad,
-               layout.intervalCard.top + DpiScale(context->window, 12),
+               layout.intervalCard.top + DpiScale(context->window, 8),
                DpiScale(context->window, 140), labelHeight, TRUE);
     MoveWindow(GetDlgItem(context->window, IDC_INTERVAL_HELP), layout.intervalCard.left + pad,
-               layout.intervalCard.top + DpiScale(context->window, 37),
+               layout.intervalCard.top + DpiScale(context->window, 28),
                DpiScale(context->window, 180), helpHeight, TRUE);
     MoveWindow(context->interval, layout.intervalCard.left + pad,
-               layout.intervalCard.top + DpiScale(context->window, 58),
+               layout.intervalCard.top + DpiScale(context->window, 45),
                layout.intervalCard.right - layout.intervalCard.left - 2 * pad, rowHeight, TRUE);
     MoveWindow(context->intervalSpin, layout.intervalCard.right - pad - DpiScale(context->window, 18),
-               layout.intervalCard.top + DpiScale(context->window, 58),
+               layout.intervalCard.top + DpiScale(context->window, 45),
                DpiScale(context->window, 18), rowHeight, TRUE);
 
     MoveWindow(GetDlgItem(context->window, IDC_CLICK_OPTIONS_LABEL), layout.optionCard.left + pad,
-               layout.optionCard.top + DpiScale(context->window, 12),
+               layout.optionCard.top + DpiScale(context->window, 8),
                DpiScale(context->window, 150), labelHeight, TRUE);
     MoveWindow(GetDlgItem(context->window, IDC_LABEL_MOUSE_BUTTON), layout.optionCard.left + pad,
-               layout.optionCard.top + DpiScale(context->window, 38),
+               layout.optionCard.top + DpiScale(context->window, 30),
                DpiScale(context->window, 140), labelHeight, TRUE);
     MoveWindow(GetDlgItem(context->window, IDC_LABEL_CLICK_TYPE), layout.optionCard.left + pad,
-               layout.optionCard.top + DpiScale(context->window, 104),
+               layout.optionCard.top + DpiScale(context->window, 84),
                DpiScale(context->window, 140), labelHeight, TRUE);
     const int comboWidth = layout.optionCard.right - layout.optionCard.left - 2 * pad;
-    const int comboItemHeight = DpiScale(context->window, 24);
-    const int comboExtraHeight = DpiScale(context->window, 8);
+    const int comboItemHeight = DpiScale(context->window, 22);
+    const int comboExtraHeight = DpiScale(context->window, 6);
     SendMessageW(context->buttonSelect, CB_SETITEMHEIGHT, static_cast<WPARAM>(-1),
                  rowHeight - comboExtraHeight);
     SendMessageW(context->buttonSelect, CB_SETITEMHEIGHT, 0, comboItemHeight);
@@ -643,46 +713,46 @@ void LayoutControls(AppContext* context) {
                  rowHeight - comboExtraHeight);
     SendMessageW(context->clickTypeSelect, CB_SETITEMHEIGHT, 0, comboItemHeight);
     MoveWindow(context->buttonSelect, layout.optionCard.left + pad,
-               layout.optionCard.top + DpiScale(context->window, 58), comboWidth,
+               layout.optionCard.top + DpiScale(context->window, 46), comboWidth,
                rowHeight + 3 * comboItemHeight + comboExtraHeight, TRUE);
     MoveWindow(context->clickTypeSelect, layout.optionCard.left + pad,
-               layout.optionCard.top + DpiScale(context->window, 124), comboWidth,
+               layout.optionCard.top + DpiScale(context->window, 100), comboWidth,
                rowHeight + 2 * comboItemHeight + comboExtraHeight, TRUE);
 
     MoveWindow(GetDlgItem(context->window, IDC_STATUS_LABEL), layout.statusCard.left + pad,
-               layout.statusCard.top + DpiScale(context->window, 12),
+               layout.statusCard.top + DpiScale(context->window, 8),
                DpiScale(context->window, 150), labelHeight, TRUE);
     MoveWindow(context->status, layout.statusCard.left + pad,
-               layout.statusCard.top + DpiScale(context->window, 43),
+               layout.statusCard.top + DpiScale(context->window, 30),
                layout.statusCard.right - layout.statusCard.left - 2 * pad,
-               DpiScale(context->window, 22), TRUE);
+               DpiScale(context->window, 20), TRUE);
     MoveWindow(GetDlgItem(context->window, IDC_STATUS_HELP), layout.statusCard.left + pad,
-               layout.statusCard.top + DpiScale(context->window, 70),
+               layout.statusCard.top + DpiScale(context->window, 54),
                layout.statusCard.right - layout.statusCard.left - 2 * pad, helpHeight, TRUE);
     MoveWindow(context->error, layout.statusCard.left + pad,
-               layout.statusCard.top + DpiScale(context->window, 92),
+               layout.statusCard.top + DpiScale(context->window, 72),
                layout.statusCard.right - layout.statusCard.left - 2 * pad,
-               DpiScale(context->window, 24), TRUE);
+               layout.statusCard.bottom - layout.statusCard.top - DpiScale(context->window, 80), TRUE);
 
     MoveWindow(GetDlgItem(context->window, IDC_LABEL_HOTKEY), layout.hotkeyCard.left + pad,
-               layout.hotkeyCard.top + DpiScale(context->window, 14),
+               layout.hotkeyCard.top + DpiScale(context->window, 8),
                DpiScale(context->window, 120), labelHeight, TRUE);
     MoveWindow(GetDlgItem(context->window, IDC_HOTKEY_HELP),
-               layout.hotkeyCard.left + DpiScale(context->window, 126),
-               layout.hotkeyCard.top + DpiScale(context->window, 16),
+               layout.hotkeyCard.left + DpiScale(context->window, 118),
+               layout.hotkeyCard.top + DpiScale(context->window, 10),
                DpiScale(context->window, 180), helpHeight, TRUE);
-    const int captureWidth = DpiScale(context->window, 76);
+    const int captureWidth = DpiScale(context->window, 68);
     MoveWindow(context->hotkey, layout.hotkeyCard.left + pad,
-               layout.hotkeyCard.top + DpiScale(context->window, 42),
+               layout.hotkeyCard.top + DpiScale(context->window, 30),
                layout.hotkeyCard.right - layout.hotkeyCard.left - 3 * pad - captureWidth,
-               DpiScale(context->window, 32), TRUE);
+               DpiScale(context->window, 28), TRUE);
     MoveWindow(context->hotkeyCapture, layout.hotkeyCard.right - pad - captureWidth,
-               layout.hotkeyCard.top + DpiScale(context->window, 42),
+               layout.hotkeyCard.top + DpiScale(context->window, 30),
                captureWidth, DpiScale(context->window, 32), TRUE);
 
-    MoveWindow(context->startPause, layout.mainLeft,
-               client.bottom - DpiScale(context->window, 64),
-               layout.mainRight - layout.mainLeft, DpiScale(context->window, 44), TRUE);
+    MoveWindow(context->startPause, layout.actionButton.left, layout.actionButton.top,
+               layout.actionButton.right - layout.actionButton.left,
+               layout.actionButton.bottom - layout.actionButton.top, TRUE);
 }
 
 void DrawRoundedSurface(HDC dc, const RECT& rect, COLORREF fillColor,
@@ -885,13 +955,11 @@ bool ReadSettingsFromControls(AppContext* context, Settings* settings) {
 void SaveCurrentSettings(AppContext* context) {
     Settings settings;
     if (!ReadSettingsFromControls(context, &settings)) {
+        SaveWindowSize(context);
         return;
     }
     context->settings = settings;
-    ProductMessage saveError;
-    if (!SaveSettings(settings, &saveError)) {
-        SetError(context, saveError.view());
-    }
+    SaveWindowSize(context);
 }
 
 void ToggleRunning(AppContext* context) {
@@ -1089,17 +1157,95 @@ LRESULT CALLBACK MainWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM
         UpdateStatePresentation(context);
         return 0;
 
+    case WM_GETMINMAXINFO: {
+        auto* limits = reinterpret_cast<MINMAXINFO*>(lParam);
+        if (limits != nullptr) {
+            const DWORD style = static_cast<DWORD>(GetWindowLongPtrW(window, GWL_STYLE));
+            const DWORD exStyle = static_cast<DWORD>(GetWindowLongPtrW(window, GWL_EXSTYLE));
+            UINT dpi = GetDpiForWindow(window);
+            if (dpi == 0) {
+                dpi = GetDpiForSystem();
+            }
+            WindowPixelSize minimum{};
+            WindowPixelSize maximum{};
+            if (WindowRectSizeForClientSize(
+                    style, exStyle, FALSE, dpi,
+                    WindowClientSize{static_cast<int>(kMinimumWindowClientWidth),
+                                     static_cast<int>(kMinimumWindowClientHeight)},
+                    &minimum) &&
+                WindowRectSizeForClientSize(
+                    style, exStyle, FALSE, dpi,
+                    WindowClientSize{static_cast<int>(kMaximumWindowClientWidth),
+                                     static_cast<int>(kMaximumWindowClientHeight)},
+                    &maximum)) {
+                limits->ptMinTrackSize.x = minimum.width;
+                limits->ptMinTrackSize.y = minimum.height;
+                limits->ptMaxTrackSize.x = maximum.width;
+                limits->ptMaxTrackSize.y = maximum.height;
+            }
+        }
+        return 0;
+    }
+
     case WM_SIZE:
+        UpdateWindowClientSize(context);
+        if (context != nullptr && context->sizeMoveActive) {
+            context->sizeChangedDuringMove = true;
+        }
         LayoutControls(context);
+        return 0;
+
+    case WM_ENTERSIZEMOVE:
+        if (context != nullptr) {
+            context->sizeMoveActive = true;
+            context->sizeChangedDuringMove = false;
+        }
+        return 0;
+
+    case WM_EXITSIZEMOVE:
+        if (context != nullptr) {
+            if (context->sizeChangedDuringMove) {
+                SaveWindowSize(context);
+            }
+            context->sizeMoveActive = false;
+            context->sizeChangedDuringMove = false;
+        }
         return 0;
 
     case WM_DPICHANGED: {
         const RECT* suggested = reinterpret_cast<const RECT*>(lParam);
         if (suggested != nullptr) {
-            SetWindowPos(window, nullptr, suggested->left, suggested->top,
-                         suggested->right - suggested->left,
-                         suggested->bottom - suggested->top,
-                         SWP_NOZORDER | SWP_NOACTIVATE);
+            const DWORD style = static_cast<DWORD>(GetWindowLongPtrW(window, GWL_STYLE));
+            const DWORD exStyle = static_cast<DWORD>(GetWindowLongPtrW(window, GWL_EXSTYLE));
+            UINT dpi = LOWORD(wParam);
+            if (dpi == 0) {
+                dpi = GetDpiForWindow(window);
+            }
+            WindowPixelSize minimum{};
+            WindowPixelSize maximum{};
+            if (WindowRectSizeForClientSize(
+                    style, exStyle, FALSE, dpi,
+                    WindowClientSize{static_cast<int>(kMinimumWindowClientWidth),
+                                     static_cast<int>(kMinimumWindowClientHeight)},
+                    &minimum) &&
+                WindowRectSizeForClientSize(
+                    style, exStyle, FALSE, dpi,
+                    WindowClientSize{static_cast<int>(kMaximumWindowClientWidth),
+                                     static_cast<int>(kMaximumWindowClientHeight)},
+                    &maximum)) {
+                const int suggestedWidth = suggested->right - suggested->left;
+                const int suggestedHeight = suggested->bottom - suggested->top;
+                const int width = suggestedWidth < minimum.width
+                                      ? minimum.width
+                                      : suggestedWidth > maximum.width ? maximum.width
+                                                                       : suggestedWidth;
+                const int height = suggestedHeight < minimum.height
+                                       ? minimum.height
+                                       : suggestedHeight > maximum.height ? maximum.height
+                                                                          : suggestedHeight;
+                SetWindowPos(window, nullptr, suggested->left, suggested->top, width, height,
+                             SWP_NOZORDER | SWP_NOACTIVATE);
+            }
         }
         ApplyLayoutAndTheme(context);
         return 0;
@@ -1304,13 +1450,18 @@ int RunApplication(HINSTANCE instance, int showCommand) {
         context.lastError.Assign(loadWarning.view());
     }
 
-    const DWORD windowStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
     const UINT initialDpi = GetDpiForSystem();
-    RECT desired{0, 0, DpiScale(nullptr, 800), DpiScale(nullptr, 600)};
-    if (!AdjustWindowRectExForDpi(&desired, windowStyle, FALSE, 0, initialDpi)) {
-        AdjustWindowRectEx(&desired, windowStyle, FALSE, 0);
+    const WindowClientSize defaultClientSize = ClampWindowClientSize(
+        static_cast<int>(context.settings.clientWidth),
+        static_cast<int>(context.settings.clientHeight));
+    context.settings.clientWidth = static_cast<std::uint32_t>(defaultClientSize.width);
+    context.settings.clientHeight = static_cast<std::uint32_t>(defaultClientSize.height);
+    RECT desired{};
+    if (!AdjustedWindowRectForClientSize(kMainWindowStyle, 0, FALSE, initialDpi,
+                                         defaultClientSize, &desired)) {
+        return 1;
     }
-    HWND window = CreateWindowExW(0, kWindowClassName, kWindowTitle, windowStyle,
+    HWND window = CreateWindowExW(0, kWindowClassName, kWindowTitle, kMainWindowStyle,
                                   CW_USEDEFAULT, CW_USEDEFAULT,
                                   desired.right - desired.left, desired.bottom - desired.top,
                                   nullptr, nullptr, instance, &context);
@@ -1323,6 +1474,9 @@ int RunApplication(HINSTANCE instance, int showCommand) {
 
     MSG message{};
     while (GetMessageW(&message, nullptr, 0, 0) > 0) {
+        if (IsDialogMessageW(window, &message)) {
+            continue;
+        }
         TranslateMessage(&message);
         DispatchMessageW(&message);
     }
