@@ -25,7 +25,11 @@ set(MOUSECLICK_SOURCES
     src/settings.cpp
     src/click_worker.cpp
     src/hotkey.cpp
-    src/ui.cpp
+    src/theme.cpp
+    src/layout.cpp
+    src/painting.cpp
+    src/controls.cpp
+    src/window_proc.cpp
     src/main.cpp
     src/MouseClick.rc
 )
