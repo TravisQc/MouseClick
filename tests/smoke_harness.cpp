@@ -61,8 +61,12 @@ BOOL CALLBACK FindProcessWindowCallback(HWND window, LPARAM parameter) {
     DWORD windowProcessId = 0;
     GetWindowThreadProcessId(window, &windowProcessId);
     if (windowProcessId == search->processId) {
-        search->window = window;
-        return FALSE;
+        wchar_t className[128]{};
+        if (GetClassNameW(window, className, static_cast<int>(sizeof(className) / sizeof(className[0]))) > 0 &&
+            wcscmp(className, L"MouseClick.MainWindow") == 0) {
+            search->window = window;
+            return FALSE;
+        }
     }
     return TRUE;
 }
