@@ -9,8 +9,54 @@ int DpiScale(HWND window, int value) {
 
 namespace {
 
+// The main content is a single vertical stack of rows, described here at
+// logical (96-DPI) sizes and resolved top-to-bottom. Exactly one row is
+// flexible (kFlexHeight) and absorbs whatever vertical space is left over, so
+// adding, reordering, or resizing a card is a matter of editing this table
+// instead of hand-balancing top/bottom pixel offsets.
+constexpr int kFlexHeight = -1;
+
+enum class Row {
+    Header,   // spacer for the title/header area; no card rect is emitted
+    Interval, // full-width interval card
+    Detail,   // two side-by-side cards: options (left) + status (right)
+    Hotkey,   // full-width hotkey card
+    Action,   // full-width start/pause button
+};
+
+struct RowSpec {
+    Row row;
+    int height;   // logical px, or kFlexHeight for the flexible row
+    int gapAfter; // logical px to the next row; the last entry is the bottom margin
+};
+
+constexpr RowSpec kRows[] = {
+    {Row::Header,   58,          8},
+    {Row::Interval, 68,          12},
+    {Row::Detail,   kFlexHeight, 12},
+    {Row::Hotkey,   68,          10},
+    {Row::Action,   46,          16},
+};
+
+constexpr int kContentMargin = 16;   // left/right margin around the stack
+constexpr int kColumnGap = 12;       // gap between the two columns of the detail row
+constexpr int kMinFlexHeight = 140;  // fallback flexible height when the window is too short
+
 RECT MakeRect(int x, int y, int width, int height) {
     return RECT{x, y, x + width, y + height};
+}
+
+// Scaled height consumed by every fixed row plus every gap, i.e. all vertical
+// space that is not available to the flexible row.
+int FixedStackHeight(HWND window) {
+    int total = 0;
+    for (const RowSpec& spec : kRows) {
+        if (spec.height != kFlexHeight) {
+            total += DpiScale(window, spec.height);
+        }
+        total += DpiScale(window, spec.gapAfter);
+    }
+    return total;
 }
 
 } // namespace
@@ -18,40 +64,48 @@ RECT MakeRect(int x, int y, int width, int height) {
 LayoutMetrics CalculateLayout(HWND window) {
     RECT client{};
     GetClientRect(window, &client);
-    const int margin = DpiScale(window, 16);
-    const int gap = DpiScale(window, 12);
+
+    const int margin = DpiScale(window, kContentMargin);
     const int mainLeft = margin;
     const int mainRight = client.right > margin ? client.right - margin : mainLeft;
     const int contentWidth = mainRight > mainLeft ? mainRight - mainLeft : 0;
-    const int leftCardWidth = (contentWidth - gap) / 2;
-    const int rightCardWidth = contentWidth - leftCardWidth - gap;
 
-    const int headerHeight = DpiScale(window, 58);
-    const int intervalTop = headerHeight + DpiScale(window, 8);
-    const int intervalHeight = DpiScale(window, 68);
-
-    const int actionHeight = DpiScale(window, 46);
-    const int actionBottom = client.bottom - DpiScale(window, 16);
-    const int actionTop = actionBottom > actionHeight ? actionBottom - actionHeight : 0;
-
-    const int hotkeyHeight = DpiScale(window, 68);
-    const int hotkeyBottom = actionTop > DpiScale(window, 10) ? actionTop - DpiScale(window, 10) : 0;
-    const int hotkeyTop = hotkeyBottom > hotkeyHeight ? hotkeyBottom - hotkeyHeight : 0;
-
-    const int detailTop = intervalTop + intervalHeight + gap;
-    const int detailBottom = hotkeyTop > gap ? hotkeyTop - gap : detailTop;
-    const int detailHeight = detailBottom > detailTop ? detailBottom - detailTop : DpiScale(window, 140);
+    const int flexRaw = client.bottom - FixedStackHeight(window);
+    const int flexHeight = flexRaw > 0 ? flexRaw : DpiScale(window, kMinFlexHeight);
 
     LayoutMetrics layout;
-    layout.intervalCard = MakeRect(mainLeft, intervalTop, contentWidth, intervalHeight);
-    layout.optionCard = MakeRect(mainLeft, detailTop, leftCardWidth, detailHeight);
-    layout.statusCard = MakeRect(mainLeft + leftCardWidth + gap, detailTop, rightCardWidth, detailHeight);
-    layout.hotkeyCard = MakeRect(mainLeft, hotkeyTop, contentWidth, hotkeyHeight);
-    layout.actionButton = MakeRect(mainLeft, actionTop, contentWidth, actionHeight);
     layout.mainLeft = mainLeft;
     layout.mainRight = mainRight;
 
-    // Card 1 input box rect
+    int y = 0;
+    for (const RowSpec& spec : kRows) {
+        const int height = spec.height == kFlexHeight ? flexHeight : DpiScale(window, spec.height);
+        switch (spec.row) {
+        case Row::Header:
+            break; // spacer only
+        case Row::Interval:
+            layout.intervalCard = MakeRect(mainLeft, y, contentWidth, height);
+            break;
+        case Row::Detail: {
+            const int columnGap = DpiScale(window, kColumnGap);
+            const int leftWidth = (contentWidth - columnGap) / 2;
+            const int rightWidth = contentWidth - leftWidth - columnGap;
+            layout.optionCard = MakeRect(mainLeft, y, leftWidth, height);
+            layout.statusCard = MakeRect(mainLeft + leftWidth + columnGap, y, rightWidth, height);
+            break;
+        }
+        case Row::Hotkey:
+            layout.hotkeyCard = MakeRect(mainLeft, y, contentWidth, height);
+            break;
+        case Row::Action:
+            layout.actionButton = MakeRect(mainLeft, y, contentWidth, height);
+            break;
+        }
+        y += height + DpiScale(window, spec.gapAfter);
+    }
+
+    // Interval input box: right-aligned inside the interval card, leaving room for the "ms" label.
+    const int intervalHeight = layout.intervalCard.bottom - layout.intervalCard.top;
     const int boxW1 = DpiScale(window, 175);
     const int boxH1 = DpiScale(window, 34);
     const int msW = DpiScale(window, 24);
@@ -60,7 +114,8 @@ LayoutMetrics CalculateLayout(HWND window) {
     const int boxTop1 = layout.intervalCard.top + (intervalHeight - boxH1) / 2;
     layout.intervalInputBox = MakeRect(boxLeft1, boxTop1, boxW1, boxH1);
 
-    // Card 4 input box rect
+    // Hotkey input box: right-aligned inside the hotkey card, left of the "change" button.
+    const int hotkeyHeight = layout.hotkeyCard.bottom - layout.hotkeyCard.top;
     const int btnW = DpiScale(window, 76);
     const int boxW4 = DpiScale(window, 185);
     const int boxH4 = DpiScale(window, 34);

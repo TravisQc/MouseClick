@@ -42,16 +42,6 @@ void UpdateWindowClientSize(AppContext* context) {
     context->settings.clientHeight = kDefaultWindowClientHeight;
 }
 
-void SaveWindowSize(AppContext* context) {
-    if (context == nullptr) {
-        return;
-    }
-    ProductMessage saveError;
-    if (!SaveSettings(context->settings, &saveError)) {
-        SetError(context, saveError.view());
-    }
-}
-
 void SetControlsEnabled(AppContext* context, bool enabled) {
     if (context == nullptr) {
         return;
@@ -690,6 +680,20 @@ int RunApplication(HINSTANCE instance, int showCommand) {
                                   nullptr, nullptr, instance, &context);
     if (window == nullptr) {
         return 1;
+    }
+
+    // The initial size and the resources built in WM_CREATE were derived from the
+    // system DPI (GetDpiForSystem, fixed at logon from the primary monitor). When the
+    // window lands on a monitor with a different scale, it would otherwise open
+    // oversized and only snap to the right size after a stray DPI change. Now that the
+    // window exists and is associated with its monitor, rebuild for its real DPI while
+    // it is still hidden, so it appears correctly on the first show.
+    const UINT windowDpi = GetDpiForWindow(window);
+    if (windowDpi != 0 && windowDpi != initialDpi) {
+        const WindowPixelSize correctedSize = LogicalClientSizeToPixels(defaultClientSize, windowDpi);
+        SetWindowPos(window, nullptr, 0, 0, correctedSize.width, correctedSize.height,
+                     SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        ApplyLayoutAndTheme(&context);
     }
 
     ShowWindow(window, showCommand);
